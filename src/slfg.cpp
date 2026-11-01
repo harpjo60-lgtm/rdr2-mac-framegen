@@ -44,8 +44,8 @@ static PFun_slPCLSetMarker *pMarker;
 static const sl::ViewportHandle viewport{0u};
 static sl::FrameToken *token;  // frame being built (set at frame start)
 static uint32_t frameIndex;
-static int fgOn, wantOn = 1;
-static LONG presents;
+static int fgOn, wantOn = 1, supported = 1;
+static LONG presents, dlssFrames, missed;  // dlssFrames: DLSS evaluates since the last present
 
 static void on_sl_log(sl::LogType type, const char *msg) {
     if (type == sl::LogType::eInfo) return;  // warnings and errors only
@@ -121,7 +121,7 @@ extern "C" void slfg_set_device(void *device) {
     sl::Result s = pSupported(sl::kFeatureDLSS_G, ai);
     LOG("STREAMLINE device %p set (%d); DLSS-G supported: %s (%d)", device, (int)r,
         s == sl::Result::eOk ? "YES" : "NO", (int)s);
-    if (s != sl::Result::eOk) wantOn = 0;
+    if (s != sl::Result::eOk) wantOn = supported = 0;
     get_feature_functions();
     if (pReflexSetOptions) {
         sl::ReflexOptions ro{};
@@ -164,6 +164,7 @@ extern "C" void slfg_dlss_frame(void *cmdlist, void *depth, void *mvecs, unsigne
                                 int depthInverted, int reset) {
     if (state != 1) return;
     begin_frame();  // one DLSS evaluate per game frame (verified in RDR2 logs) = one frame token
+    InterlockedIncrement(&dlssFrames);
     if (!token) return;
     if (pMarker) { pMarker(sl::PCLMarker::eSimulationEnd, *token); pMarker(sl::PCLMarker::eRenderSubmitStart, *token); }
 
@@ -198,7 +199,7 @@ extern "C" void slfg_dlss_frame(void *cmdlist, void *depth, void *mvecs, unsigne
     c.depthInverted = depthInverted ? sl::Boolean::eTrue : sl::Boolean::eFalse;
     c.cameraMotionIncluded = sl::Boolean::eTrue;
     c.motionVectors3D = sl::Boolean::eFalse;
-    c.reset = reset ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+    c.reset = reset || !fgOn ? sl::Boolean::eTrue : sl::Boolean::eFalse;  // fresh start after frame gen was off
     sl::Result rc = pSetConstants(c, *token, viewport);
 
     // Copied by Streamline right now (eOnlyValidNow), on the game's command list.
@@ -220,11 +221,17 @@ extern "C" void slfg_dlss_frame(void *cmdlist, void *depth, void *mvecs, unsigne
 // The game holds Streamline's proxy swapchain; we patch the proxy's method
 // table (in sl.interposer.dll) to add the Reflex present markers it requires.
 static void *oPresent, *oPresent1, *oResize, *oResize1, *oFullscreen;
+static void *gameSc;  // the game's proxy; Streamline's own swapchains share the method table
 
+// Presents with no DLSS evaluate before them (pause menu, DLSS off) give frame
+// generation nothing new to interpolate, so it goes off until DLSS frames come
+// back. Three in a row, not one, in case evaluate and Present ever run out of order.
 static void before_present(void) {
-    if (!token) return;  // no DLSS this frame (menus): frame generation has nothing to work with
+    if (InterlockedExchange(&dlssFrames, 0)) missed = 0;
+    else if (++missed >= 3 && fgOn) set_mode(0);
+    if (!token) return;
     if (pMarker) { pMarker(sl::PCLMarker::eRenderSubmitEnd, *token); pMarker(sl::PCLMarker::ePresentStart, *token); }
-    if (wantOn && !fgOn) set_mode(1);
+    if (wantOn && !fgOn && !missed) set_mode(1);
 }
 static void after_present(void) {
     if (token && pMarker) pMarker(sl::PCLMarker::ePresentEnd, *token);
@@ -238,12 +245,16 @@ static void after_present(void) {
     }
 }
 static HRESULT STDMETHODCALLTYPE h_Present(IDXGISwapChain *sc, UINT sync, UINT flags) {
+    if ((void *)sc != gameSc || (flags & DXGI_PRESENT_TEST))  // not the game's, or only asks "is the window visible?"
+        return ((HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain *, UINT, UINT))oPresent)(sc, sync, flags);
     before_present();
     HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain *, UINT, UINT))oPresent)(sc, sync, flags);
     after_present();
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE h_Present1(IDXGISwapChain1 *sc, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS *pp) {
+    if ((void *)sc != gameSc || (flags & DXGI_PRESENT_TEST))
+        return ((HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain1 *, UINT, UINT, const DXGI_PRESENT_PARAMETERS *))oPresent1)(sc, sync, flags, pp);
     before_present();
     HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain1 *, UINT, UINT, const DXGI_PRESENT_PARAMETERS *))oPresent1)(sc, sync, flags, pp);
     after_present();
@@ -291,6 +302,7 @@ extern "C" void slfg_wrap_swapchain(void **sc) {
                        (LPCSTR)v, &owner);
     LOG("STREAMLINE swapchain %p -> proxy %p (%d), methods %p %s", native, *sc, (int)r, (void *)v,
         owner == slMod ? "in sl.interposer" : "NOT Streamline's - markers not hooked");
+    gameSc = *sc;
     if (owner != slMod || v == vt) return;
     vt = v;
     patch(v, 8, (void *)h_Present, &oPresent);
@@ -301,4 +313,4 @@ extern "C" void slfg_wrap_swapchain(void **sc) {
 }
 
 // From the DLSS side when DLSS is released/restarted (pause menus etc.).
-extern "C" void slfg_dlss_paused(int paused) { wantOn = !paused; if (paused) set_mode(0); }
+extern "C" void slfg_dlss_paused(int paused) { wantOn = !paused && supported; if (paused) set_mode(0); }

@@ -187,6 +187,9 @@ static void report(int f, intptr_t a, intptr_t b, intptr_t c, intptr_t d, intptr
 #define DLSS_FLAG_DEPTH_INVERTED  (1u << 3)
 
 static unsigned dlssHandle = ~0u, dlssFlags, renderW, renderH;  // from DLSS CreateFeature
+// The game's DLSS handle object. Matched by pointer, not by its Id: Streamline's own
+// frame-generation handle can have the same Id, and its release must not pause us.
+static void *dlssH;
 static CRITICAL_SECTION fgLock;
 // Engines like RDR2's may run DLSS for frame N+1 before presenting frame N, so
 // captures queue up and each Present takes the oldest (FIFO keeps them paired).
@@ -248,15 +251,17 @@ static int copy_into(void *cmd, ID3D12Resource *src, ID3D12Resource **dst) {
 }
 
 static void fg_hook(int f, intptr_t a, intptr_t b, intptr_t c, intptr_t d, intptr_t r) {
-    if (f == F_ReleaseFeature && a && *(unsigned *)a == dlssHandle) {
+    if (f == F_ReleaseFeature && a && (void *)a == dlssH) {
         if (slfg_active()) slfg_dlss_paused(1);
         L("FRAMEGEN DLSS released; pausing frame generation");
         dlssHandle = ~0u;
+        dlssH = NULL;
         InterlockedCompareExchange(&fgDrop, 1, 0);
     }
     if (f == F_Shutdown || f == F_Shutdown1 || f == F_Init || f == F_Init_Ext || f == F_Init_ProjectID) {
         if (fgHandle) L("FRAMEGEN NGX restarted; forgetting frame generator");
         dlssHandle = ~0u;
+        dlssH = NULL;
         fgDrop = 2;
     }
     if (r != NGX_OK || !c) return;
@@ -264,14 +269,15 @@ static void fg_hook(int f, intptr_t a, intptr_t b, intptr_t c, intptr_t d, intpt
     void *p = (void *)c;
     if (f == F_CreateFeature && b == 1 && d && *(void **)d) {  // DLSS upscaler created
         if (slfg_active()) slfg_dlss_paused(0);
-        dlssHandle = **(unsigned **)d;
+        dlssH = *(void **)d;
+        dlssHandle = *(unsigned *)dlssH;
         dlssFlags = pgetu(p, GET_INT, "DLSS.Feature.Create.Flags", 0);
         renderW = pgetu(p, GET_UINT, "Width", 0);
         renderH = pgetu(p, GET_UINT, "Height", 0);
         L("FRAMEGEN sees DLSS handle=%u flags=0x%x render=%ux%u", dlssHandle, dlssFlags, renderW, renderH);
         return;
     }
-    if (fgGaveUp || f != F_EvaluateFeature || !b || *(unsigned *)b != dlssHandle) return;
+    if (fgGaveUp || f != F_EvaluateFeature || !b || (void *)b != dlssH) return;
 
     uint64_t depth, mvecs;
     if (pget(p, GET_D3D12RES, "Depth", &depth) != NGX_OK || !depth ||
