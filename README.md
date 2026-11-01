@@ -8,6 +8,11 @@ RDR2 only ships DLSS upscaling, not frame generation. This mod adds the missing 
 
 Tested on a MacBook Air M4 (macOS 27, CrossOver with D3DMetal 3 / GPTK 3, 100 Hz display). It will probably also work in other Wine-based launchers and wrappers that use D3DMetal with DLSS/MetalFX support, but only CrossOver has been tested.
 
+**Before you start:**
+- **DLSS must be on** in the game (any mode). No DLSS, no frame generation.
+- **No in-game toggle.** To turn it off, move `version.dll` out of the game folder; move it back to turn it on.
+- **HUD ghosting** on the minimap and crosshair is expected; see [Known issues](#known-issues).
+
 > Not affiliated with Rockstar, NVIDIA, Apple or CodeWeavers. **Story mode only.** Don't use it in Red Dead Online.
 
 ## Known issues
