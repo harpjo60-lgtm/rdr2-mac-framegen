@@ -1,58 +1,69 @@
 # RDR2 Mac Frame Gen
 
-Frame generation for **Red Dead Redemption 2** (Windows, DirectX 12) on Apple Silicon Macs running **CrossOver**.
+Frame generation for **Red Dead Redemption 2** (Windows, DirectX 12) on Apple Silicon Macs.
 
-Cyberpunk 2077 gets frame generation on Mac because CrossOver's D3DMetal turns NVIDIA's DLSS Frame Generation into Apple's MetalFX frame interpolation. RDR2 only ships DLSS upscaling, not frame generation. This mod adds the missing piece: it takes the depth and motion data the game already sends to DLSS and feeds it to NVIDIA Streamline's frame generation, which D3DMetal then runs on MetalFX.
+RDR2 only ships DLSS upscaling, not frame generation. This mod adds the missing piece: it takes the depth and motion data the game already sends to DLSS and uses it for frame generation, which runs on Apple's MetalFX. Roughly doubles the frame rate you see.
 
-Tested on a MacBook Air M4 (macOS 27, CrossOver with D3DMetal 3 / GPTK 3, 100 Hz display). Roughly doubles the frame rate you see.
+> **You must download 6 NVIDIA files yourself.** This repo only contains the mod (`version.dll`). The NVIDIA Streamline files it needs aren't included; you get them for free from NVIDIA's official release (step 2 below).
+
+Tested on a MacBook Air M4 (macOS 27, CrossOver with D3DMetal 3 / GPTK 3, 100 Hz display). It will probably also work in other Wine-based launchers and wrappers that use D3DMetal with DLSS/MetalFX support, but only CrossOver has been tested.
 
 > Not affiliated with Rockstar, NVIDIA, Apple or CodeWeavers. **Story mode only.** Don't use it in Red Dead Online.
 
+## Known issues
+
+- **HUD ghosting.** Generated frames are made from the finished image, HUD included, so HUD elements can smear or double when the camera moves:
+  - Minimap glitches → set the radar to *Compass* or *Off*.
+  - Crosshair doubles or triples when you move fast → set the reticle to *Off* or *Simple*.
+
+  A real fix needs a copy of each frame without the HUD, which RDR2 doesn't make. **If you'd like to fork this and fix it, please do. We recommend it, and the code is MIT-licensed.**
+- **DLSS has to be on.** The mod reads its data from DLSS, so if DLSS is off, there's no frame generation. If you don't like DLSS, sorry, but it has to be on. Any mode works; *Quality* is the highest and looks best.
+- CrossOver logs a few missing NVIDIA functions (`SetReflexSync` and others). These are harmless.
+
 ## Requirements
 
-- Apple Silicon Mac, CrossOver with D3DMetal (DirectX 12)
-- RDR2 running in DirectX 12 mode with **DLSS turned on** in the game's graphics settings. The mod reads its data from DLSS, so with DLSS off it does nothing.
+- Apple Silicon Mac
+- CrossOver with D3DMetal (or, untested, another Wine wrapper with D3DMetal and DLSS/MetalFX support)
+- RDR2 in DirectX 12 mode, with **DLSS on** in the game's graphics settings
 - In the bottle's CrossOver settings: **DLSS / MetalFX enabled** (`D3DM_ENABLE_METALFX=1`)
 
 ## Install
 
 1. Download `version.dll` from this repo's [Releases](../../releases).
-2. Download **NVIDIA Streamline SDK v2.14.16** from [NVIDIA's Streamline releases](https://github.com/NVIDIA-RTX/Streamline/releases/tag/v2.14.16). Get the plain `streamline-sdk-v2.14.16.zip`, **not** the `aarch64` or `arm64ec` ones. The game is an x64 Windows program even on a Mac. From its `bin/x64` folder, take these 6 files:
+2. **Download the NVIDIA files yourself:** get **Streamline SDK v2.14.16** from [NVIDIA's Streamline releases](https://github.com/NVIDIA-RTX/Streamline/releases/tag/v2.14.16). Take the plain `streamline-sdk-v2.14.16.zip`, **not** the `aarch64` or `arm64ec` ones; the game is an x64 Windows program even on a Mac. Unzip it, and from its `bin/x64` folder take these 6 files:
    - `sl.interposer.dll`
    - `sl.common.dll`
    - `sl.dlss_g.dll`
    - `sl.reflex.dll`
    - `sl.pcl.dll`
    - `nvngx_dlssg.dll`
-3. Put all 7 files in the RDR2 game folder, next to `RDR2.exe`. Don't replace or delete the game's own `nvngx_dlss.dll` (no "g").
+3. Put all 7 files in the RDR2 game folder, next to `RDR2.exe`.
 4. Tell Wine to load the mod's `version.dll`: in CrossOver, open the bottle's **Wine Configuration** → **Libraries**, type `version`, click **Add**, and make sure it says **(native, builtin)**.
-5. Start the game, turn on DLSS, and play. With CrossOver's Metal HUD on, you'll see MetalFX frame interpolation listed.
+5. Start the game, turn on DLSS, and play. With the Metal HUD on, you'll see MetalFX frame interpolation listed. VSync on or off both work.
 
-To uninstall, delete the 7 files and remove the `version` entry from Wine Configuration.
+## Uninstall
 
-## Recommended game settings
+Delete the 7 files and remove the `version` entry from Wine Configuration.
 
-The generated frames are made from the finished image, HUD included, so HUD elements that sit still while the world moves can ghost:
-
-- **Minimap glitches** → set the radar to *Compass* or *Off*.
-- **Crosshair doubles or triples when you move fast** → set the reticle to *Off* or *Simple*.
-
-VSync on or off both work.
-
-## Known issues
-
-- HUD ghosting (see above). A proper fix needs a copy of each frame without the HUD, which RDR2 doesn't make.
-- CrossOver logs a few missing NVIDIA functions (`SetReflexSync` and others). These are harmless.
+**Be careful with the two similar names:**
+- `nvngx_dlssg.dll` (**with** a "g") is frame generation, from this install. Delete this one.
+- `nvngx_dlss.dll` (**no** "g") is the game's own DLSS. **Don't delete it**, or DLSS stops working.
 
 ## Troubleshooting
 
 The mod writes `ngxlog.txt` and Streamline writes `sl.log` in the game folder. Look for lines starting with `STREAMLINE`, `SL ERROR` or `EXCEPTION`.
 
-- **No frame generation and `ngxlog.txt` doesn't exist**: the Wine override from step 4 is missing. It has to be set in Wine Configuration; an environment variable doesn't work.
+- **No frame generation and no `ngxlog.txt`**: the Wine override from step 4 is missing. It has to be set in Wine Configuration; an environment variable doesn't work.
 - **"DLSS-G not supported"** in the log: DLSS/MetalFX isn't enabled in the bottle's settings.
 - **Nothing happens**: DLSS is off in the game.
 
-## Building
+---
+
+## For developers
+
+Players don't need anything below; the download in Releases is ready to use.
+
+### Building
 
 Needs MinGW-w64 (`brew install mingw-w64`) and NVIDIA's Streamline headers:
 
@@ -66,7 +77,7 @@ git clone --depth 1 --branch v2.14.16 https://github.com/NVIDIA-RTX/Streamline.g
 
 This produces `src/version.dll`.
 
-## How it works
+### How it works
 
 - `src/ngxlog.c` loads as `version.dll` and forwards every call to the real one. It hooks CrossOver's NGX (DLSS) exports to capture depth, motion vectors and jitter on every DLSS evaluate, and hooks DXGI and D3D12 device creation so Streamline can wrap the factory and swapchain (manual hooking, no code patching).
 - `src/slfg.cpp` runs Streamline: per-frame tokens, camera constants, resource tags, Reflex markers, and DLSS-G turned on.
@@ -74,4 +85,4 @@ This produces `src/version.dll`.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The NVIDIA Streamline files are not included in this repo. They're MIT-licensed by NVIDIA and come from NVIDIA's own release.
+MIT, see [LICENSE](LICENSE). Fork it, change it, share it. The NVIDIA Streamline files are not included in this repo. They're MIT-licensed by NVIDIA and come from NVIDIA's own release.
