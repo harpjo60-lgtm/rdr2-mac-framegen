@@ -14,7 +14,7 @@ Tested on a MacBook Air M4 (macOS 27, CrossOver with D3DMetal 3 / GPTK 3, 100 Hz
 
 - **HUD ghosting.** Generated frames are made from the finished image, HUD included, so HUD elements can smear or double when the camera moves:
   - Minimap glitches → set the radar to *Compass* or *Off*.
-  - Crosshair doubles or triples when you move fast → set the reticle to *Off* or *Simple*.
+  - Crosshair ghosts → when you turn the camera quickly, two faint copies of the crosshair dot appear beside it and seem to orbit around the real one. Set the reticle to *Off* or *Simple*.
 
   A real fix needs a copy of each frame without the HUD, which RDR2 doesn't make. **If you'd like to fork this and fix it, please do. We recommend it, and the code is MIT-licensed.**
 - **DLSS has to be on.** The mod reads its data from DLSS, so if DLSS is off, there's no frame generation. If you don't like DLSS, sorry, but it has to be on. Any mode works; *Ultra Quality* is the highest and looks best.
