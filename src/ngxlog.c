@@ -748,22 +748,22 @@ static void hook_swapchain(void *sc, IUnknown *dev) {
 
 static HRESULT h_CreateSC(void *f, IUnknown *dev, void *desc, void **out) {
     HRESULT hr = ((HRESULT (*)(void *, IUnknown *, void *, void **))oCreateSC)(f, dev, desc, out);
-    if (SUCCEEDED(hr) && out && *out) { if (slfg_active()) slfg_wrap_swapchain(out); else hook_swapchain(*out, dev); }
+    if (SUCCEEDED(hr) && out && *out) { if (!slfg_active()) hook_swapchain(*out, dev); }  // with Streamline: its own internal swapchain
     return hr;
 }
 static HRESULT h_CreateSCHwnd(void *f, IUnknown *dev, HWND w, void *d, void *fd, void *o, void **out) {
     HRESULT hr = ((HRESULT (*)(void *, IUnknown *, HWND, void *, void *, void *, void **))oCreateSCHwnd)(f, dev, w, d, fd, o, out);
-    if (SUCCEEDED(hr) && out && *out) { if (slfg_active()) slfg_wrap_swapchain(out); else hook_swapchain(*out, dev); }
+    if (SUCCEEDED(hr) && out && *out) { if (!slfg_active()) hook_swapchain(*out, dev); }  // with Streamline: its own internal swapchain
     return hr;
 }
 static HRESULT h_CreateSCCore(void *f, IUnknown *dev, IUnknown *win, void *d, void *o, void **out) {
     HRESULT hr = ((HRESULT (*)(void *, IUnknown *, IUnknown *, void *, void *, void **))oCreateSCCore)(f, dev, win, d, o, out);
-    if (SUCCEEDED(hr) && out && *out) { if (slfg_active()) slfg_wrap_swapchain(out); else hook_swapchain(*out, dev); }
+    if (SUCCEEDED(hr) && out && *out) { if (!slfg_active()) hook_swapchain(*out, dev); }  // with Streamline: its own internal swapchain
     return hr;
 }
 static HRESULT h_CreateSCComp(void *f, IUnknown *dev, void *d, void *o, void **out) {
     HRESULT hr = ((HRESULT (*)(void *, IUnknown *, void *, void *, void **))oCreateSCComp)(f, dev, d, o, out);
-    if (SUCCEEDED(hr) && out && *out) { if (slfg_active()) slfg_wrap_swapchain(out); else hook_swapchain(*out, dev); }
+    if (SUCCEEDED(hr) && out && *out) { if (!slfg_active()) hook_swapchain(*out, dev); }  // with Streamline: its own internal swapchain
     return hr;
 }
 
@@ -958,8 +958,6 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, void *res) {
         else hz = 0;
         fclose(rf);
     }
-    L("pacing: %.1f shown fps %s, real game capped at %.1f fps", 1000.0 / refreshMs,
-      hz ? "fixed (from ngxlog_refresh.txt)" : "max (screen refresh reported by CrossOver; adapts)", 500.0 / refreshMs);
     load_real_version();
     hook_nvngx();
     hook_dxgi();

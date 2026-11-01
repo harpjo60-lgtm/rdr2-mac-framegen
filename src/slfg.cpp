@@ -45,7 +45,7 @@ static const sl::ViewportHandle viewport{0u};
 static sl::FrameToken *token;  // frame being built (set at frame start)
 static uint32_t frameIndex;
 static int fgOn, wantOn = 1, supported = 1;
-static LONG presents, dlssFrames, missed;  // dlssFrames: DLSS evaluates since the last present
+static LONG presents, dlssFrames, missed, onAt;  // dlssFrames: DLSS evaluates since the last present
 
 // Streamline repeats some harmless messages every frame (missing CrossOver NVAPI
 // functions), which would grow the log by ~80 MB an hour. Each distinct message
@@ -144,16 +144,6 @@ extern "C" void slfg_set_device(void *device) {
     }
 }
 
-// Returns Streamline's proxy for a freshly created DXGI factory; the game then
-// creates its swapchain through it, so Streamline owns presentation.
-extern "C" void *slfg_wrap_factory(void *factory) {
-    if (state != 1 || !factory) return factory;
-    void *p = factory;
-    sl::Result r = pUpgrade(&p);
-    LOG("STREAMLINE factory %p -> proxy %p (%d)", factory, p, (int)r);
-    return r == sl::Result::eOk ? p : factory;
-}
-
 static void set_mode(int on) {
     if (!pDLSSGSetOptions) return;
     sl::DLSSGOptions o{};
@@ -161,6 +151,7 @@ static void set_mode(int on) {
     o.numFramesToGenerate = 1;
     sl::Result r = pDLSSGSetOptions(viewport, o);
     if (on != fgOn) LOG("STREAMLINE frame generation %s -> %d", on ? "ON" : "OFF", (int)r);
+    if (on && !fgOn) onAt = presents;
     fgOn = on;
 }
 
@@ -235,7 +226,7 @@ extern "C" void slfg_dlss_frame(void *cmdlist, void *depth, void *mvecs, unsigne
 // The game holds Streamline's proxy swapchain; we patch the proxy's method
 // table (in sl.interposer.dll) to add the Reflex present markers it requires.
 static void *oPresent, *oPresent1, *oResize, *oResize1, *oFullscreen;
-static void *gameSc;  // the game's proxy; Streamline's own swapchains share the method table
+static void *gameSc;  // the game's proxy (other proxies share its method table)
 
 // Presents with no DLSS evaluate before them (pause menu, DLSS off) give frame
 // generation nothing new to interpolate, so it goes off until DLSS frames come
@@ -250,7 +241,7 @@ static void before_present(void) {
 static void after_present(void) {
     if (token && pMarker) pMarker(sl::PCLMarker::ePresentEnd, *token);
     LONG n = ++presents;
-    if (pDLSSGGetState && (n == 60 || n % 600 == 0)) {
+    if (pDLSSGGetState && (n == onAt + 60 || n % 3600 == 0)) {  // status=0x0: real generated frames
         sl::DLSSGState s{};
         if (pDLSSGGetState(viewport, s, nullptr) == sl::Result::eOk)
             LOG("STREAMLINE status after %ld presents: status=0x%x framesPresented=%u vsyncSupport=%d minSize=%u vram=%llu MB",
@@ -259,7 +250,7 @@ static void after_present(void) {
     }
 }
 static HRESULT STDMETHODCALLTYPE h_Present(IDXGISwapChain *sc, UINT sync, UINT flags) {
-    if ((void *)sc != gameSc || (flags & DXGI_PRESENT_TEST))  // not the game's, or only asks "is the window visible?"
+    if ((void *)sc != gameSc || (flags & DXGI_PRESENT_TEST))  // not the game's own, or only asks "is the window visible?"
         return ((HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain *, UINT, UINT))oPresent)(sc, sync, flags);
     before_present();
     HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain *, UINT, UINT))oPresent)(sc, sync, flags);
@@ -301,29 +292,72 @@ static void patch(void **vt, int i, void *fn, void **o) {
     VirtualProtect(&vt[i], sizeof(void *), old, &old);
 }
 
-// Right after the game creates its swapchain: swap in Streamline's proxy (per
-// NVIDIA's manual-hooking guide) and hook the proxy's methods for the markers.
-// Never patch the native swapchain: its method table is shared with
-// Streamline's own internal swapchain.
-extern "C" void slfg_wrap_swapchain(void **sc) {
-    static void **vt;
-    if (state != 1 || !sc || !*sc) return;
-    void *native = *sc;
-    sl::Result r = pUpgrade(sc);
-    void **v = *(void ***)*sc;
+static int in_sl(void *p) {
     HMODULE owner = nullptr;
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCSTR)v, &owner);
-    LOG("STREAMLINE swapchain %p -> proxy %p (%d), methods %p %s", native, *sc, (int)r, (void *)v,
-        owner == slMod ? "in sl.interposer" : "NOT Streamline's - markers not hooked");
+                       (LPCSTR)p, &owner);
+    return owner == slMod;
+}
+
+// The swapchain the game got from Streamline's proxy factory: already a proxy.
+// Hook the proxy's methods for the markers. (Swapchains Streamline creates on
+// the native factory are its own internal ones; never wrap or patch those.)
+static void game_swapchain(void **sc) {
+    static void **vt;
+    if (!sc || !*sc) return;
+    void **v = *(void ***)*sc;
+    LOG("STREAMLINE game swapchain %p, methods %p %s", *sc, (void *)v, in_sl(v) ? "in sl.interposer" : "NOT Streamline's - markers not hooked");
     gameSc = *sc;
-    if (owner != slMod || v == vt) return;
+    if (!in_sl(v) || v == vt) return;
     vt = v;
     patch(v, 8, (void *)h_Present, &oPresent);
     patch(v, 22, (void *)h_Present1, &oPresent1);
     patch(v, 13, (void *)h_Resize, &oResize);
     patch(v, 39, (void *)h_Resize1, &oResize1);
     patch(v, 10, (void *)h_Fullscreen, &oFullscreen);
+}
+
+static void *oFacSC, *oFacHwnd, *oFacCore, *oFacComp;
+static HRESULT STDMETHODCALLTYPE pf_CreateSC(void *f, IUnknown *dev, void *desc, void **out) {
+    HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(void *, IUnknown *, void *, void **))oFacSC)(f, dev, desc, out);
+    if (SUCCEEDED(hr)) game_swapchain(out);
+    return hr;
+}
+static HRESULT STDMETHODCALLTYPE pf_CreateSCHwnd(void *f, IUnknown *dev, HWND w, void *d, void *fd, void *o, void **out) {
+    HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(void *, IUnknown *, HWND, void *, void *, void *, void **))oFacHwnd)(f, dev, w, d, fd, o, out);
+    if (SUCCEEDED(hr)) game_swapchain(out);
+    return hr;
+}
+static HRESULT STDMETHODCALLTYPE pf_CreateSCCore(void *f, IUnknown *dev, IUnknown *win, void *d, void *o, void **out) {
+    HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(void *, IUnknown *, IUnknown *, void *, void *, void **))oFacCore)(f, dev, win, d, o, out);
+    if (SUCCEEDED(hr)) game_swapchain(out);
+    return hr;
+}
+static HRESULT STDMETHODCALLTYPE pf_CreateSCComp(void *f, IUnknown *dev, void *d, void *o, void **out) {
+    HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(void *, IUnknown *, void *, void *, void **))oFacComp)(f, dev, d, o, out);
+    if (SUCCEEDED(hr)) game_swapchain(out);
+    return hr;
+}
+
+// Returns Streamline's proxy for a freshly created DXGI factory and hooks the
+// proxy's swapchain-creation methods; the game creates its swapchain through
+// it, so Streamline owns presentation and the game holds Streamline's proxy.
+extern "C" void *slfg_wrap_factory(void *factory) {
+    static void **vt;
+    if (state != 1 || !factory) return factory;
+    void *p = factory;
+    sl::Result r = pUpgrade(&p);
+    LOG("STREAMLINE factory %p -> proxy %p (%d)", factory, p, (int)r);
+    if (r != sl::Result::eOk) return factory;
+    void **v = *(void ***)p;
+    if (in_sl(v) && v != vt) {  // methods 10/15/16/24: CreateSwapChain, ForHwnd, ForCoreWindow, ForComposition
+        vt = v;
+        patch(v, 10, (void *)pf_CreateSC, &oFacSC);
+        patch(v, 15, (void *)pf_CreateSCHwnd, &oFacHwnd);
+        patch(v, 16, (void *)pf_CreateSCCore, &oFacCore);
+        patch(v, 24, (void *)pf_CreateSCComp, &oFacComp);
+    }
+    return p;
 }
 
 // From the DLSS side when DLSS is released/restarted (pause menus etc.).
