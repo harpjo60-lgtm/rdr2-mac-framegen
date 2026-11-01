@@ -41,6 +41,10 @@ Tested on a MacBook Air M4 (macOS 27, CrossOver with D3DMetal 3 / GPTK 3, 100 Hz
 4. Tell Wine to load the mod's `version.dll`: in CrossOver, open the bottle's **Wine Configuration** → **Libraries**, type `version`, click **Add**, and make sure it says **(native, builtin)**.
 5. Start the game, turn on DLSS, and play. With the Metal HUD on, you'll see MetalFX frame interpolation listed. VSync on or off both work.
 
+### Why is the mod called `version.dll`?
+
+The game loads a standard Windows file called `version.dll`, and it checks its own folder before the system one. A file with that name next to `RDR2.exe` gets loaded instead, passes everything through to the real one, and runs the mod inside the game. No game files are changed. This is the same trick many mods use (ReShade, OptiScaler); a different name and the game would never load it.
+
 ## Uninstall
 
 Delete the 7 files and remove the `version` entry from Wine Configuration.
