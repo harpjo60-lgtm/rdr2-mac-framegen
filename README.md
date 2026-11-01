@@ -17,7 +17,7 @@ Tested on a MacBook Air M4 (macOS 27, CrossOver with D3DMetal 3 / GPTK 3, 100 Hz
   - Crosshair doubles or triples when you move fast → set the reticle to *Off* or *Simple*.
 
   A real fix needs a copy of each frame without the HUD, which RDR2 doesn't make. **If you'd like to fork this and fix it, please do. We recommend it, and the code is MIT-licensed.**
-- **DLSS has to be on.** The mod reads its data from DLSS, so if DLSS is off, there's no frame generation. If you don't like DLSS, sorry, but it has to be on. Any mode works; *Quality* is the highest and looks best.
+- **DLSS has to be on.** The mod reads its data from DLSS, so if DLSS is off, there's no frame generation. If you don't like DLSS, sorry, but it has to be on. Any mode works; *Ultra Quality* is the highest and looks best.
 - CrossOver logs a few missing NVIDIA functions (`SetReflexSync` and others). These are harmless.
 
 ## Requirements
