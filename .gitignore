@@ -1,0 +1,8 @@
+# NVIDIA SDK checkout (needed only to build), dev leftovers, build output
+streamline/
+dev/
+rdr2-framegen-files/
+*.o
+*.dll
+.DS_Store
+release/
