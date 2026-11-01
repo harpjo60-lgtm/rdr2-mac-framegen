@@ -51,7 +51,9 @@ Delete the 7 files and remove the `version` entry from Wine Configuration.
 
 ## Troubleshooting
 
-The mod writes `ngxlog.txt` and Streamline writes `sl.log` in the game folder. Look for lines starting with `STREAMLINE`, `SL ERROR` or `EXCEPTION`.
+The mod writes `ngxlog.txt` in the game folder (new each launch, stays small). Its first line shows the mod version. Look for lines starting with `STREAMLINE`, `SL ERROR` or `EXCEPTION`, and include the file if you report a bug.
+
+Some `SL ERROR` lines are normal under CrossOver and harmless: `setDynamicMFGParams`, `setFlipConfig`, `SetReflexSync`, `NGX Updater not available`, `0xbad00000`, and `ReflexNotDetectedAtRuntime`.
 
 - **No frame generation and no `ngxlog.txt`**: the Wine override from step 4 is missing. It has to be set in Wine Configuration; an environment variable doesn't work.
 - **"DLSS-G not supported"** in the log: DLSS/MetalFX isn't enabled in the bottle's settings.

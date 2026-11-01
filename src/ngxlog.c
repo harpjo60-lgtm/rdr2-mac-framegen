@@ -941,7 +941,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, void *res) {
     logf = _wfopen(p, L"w");
 
     char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH);
-    L("ngxlog loaded into %s", exe);
+    L("rdr2-mac-framegen v0.2 loaded into %s", exe);
     slfg_set_logger(slog);
     AddVectoredExceptionHandler(1, on_exception);
     DEVMODEW dm = { .dmSize = sizeof dm };

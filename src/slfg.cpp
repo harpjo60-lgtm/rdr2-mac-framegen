@@ -47,9 +47,23 @@ static uint32_t frameIndex;
 static int fgOn, wantOn = 1, supported = 1;
 static LONG presents, dlssFrames, missed;  // dlssFrames: DLSS evaluates since the last present
 
+// Streamline repeats some harmless messages every frame (missing CrossOver NVAPI
+// functions), which would grow the log by ~80 MB an hour. Each distinct message
+// (by source file:line) is logged 3 times, then hidden.
 static void on_sl_log(sl::LogType type, const char *msg) {
     if (type == sl::LogType::eInfo) return;  // warnings and errors only
-    LOG("SL %s: %.*s", type == sl::LogType::eError ? "ERROR" : "warn", (int)strcspn(msg, "\r\n"), msg);
+    const char *p = msg;
+    while (*p == '[') { const char *e = strchr(p, ']'); if (!e) break; p = e + 1; }  // skip [time][streamline][level][tid][uptime]
+    unsigned h = 2166136261u;
+    for (const char *q = p; *q && *q != '['; q++) h = (h ^ (unsigned char)*q) * 16777619u;  // "file.cpp:123"
+    static unsigned seen[128], count[128];
+    unsigned i = h % 128;
+    while (seen[i] && seen[i] != h) i = (i + 1) % 128;  // ponytail: 128 distinct messages max, then all repeat-log
+    seen[i] = h;
+    if (++count[i] > 3) return;
+    if (count[i] == 3) { LOG("SL %s (3rd time, further repeats not logged): %.*s", type == sl::LogType::eError ? "ERROR" : "warn",
+                             (int)strcspn(p, "\r\n"), p); return; }
+    LOG("SL %s: %.*s", type == sl::LogType::eError ? "ERROR" : "warn", (int)strcspn(p, "\r\n"), p);
 }
 
 extern "C" void slfg_set_logger(void (*f)(const char *)) { logf_ = f; }
@@ -79,7 +93,7 @@ extern "C" int slfg_startup(const wchar_t *dir) {
     pref.logLevel = sl::LogLevel::eDefault;
     pref.pathsToPlugins = paths;
     pref.numPathsToPlugins = 1;
-    pref.pathToLogsAndData = dirCopy;  // sl.log next to the game, handy for debugging
+    // No pathToLogsAndData: no sl.log file; Streamline's warnings/errors go to ngxlog.txt.
     pref.logMessageCallback = on_sl_log;
     pref.flags = sl::PreferenceFlags::eDisableCLStateTracking | sl::PreferenceFlags::eUseManualHooking |
                  sl::PreferenceFlags::eUseFrameBasedResourceTagging;
