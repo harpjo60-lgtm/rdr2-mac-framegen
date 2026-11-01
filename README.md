@@ -45,6 +45,16 @@ Tested on a MacBook Air M4 (macOS 27, CrossOver with D3DMetal 3 / GPTK 3, 100 Hz
 
 The game loads a standard Windows file called `version.dll`, and it checks its own folder before the system one. A file with that name next to `RDR2.exe` gets loaded instead, passes everything through to the real one, and runs the mod inside the game. No game files are changed. This is the same trick many mods use (ReShade, OptiScaler); a different name and the game would never load it.
 
+## Turning it off and on
+
+There's no in-game switch: frame generation is on whenever the mod is installed and DLSS is on.
+
+- **Tip:** after installing, select the 7 files in Finder, right-click, and give them a color tag (e.g. red) so you can always find them among the game's files.
+- **To turn it off**, move `version.dll` out of the game folder (e.g. into a folder called `framegen-off`). Without it the mod doesn't load and the other 6 files do nothing.
+- **To turn it back on**, move `version.dll` back.
+
+Frame generation always makes one extra frame per real frame (2x). The Metal HUD can briefly show a bit more than 2x because of how it averages; that's normal.
+
 ## Uninstall
 
 Delete the 7 files and remove the `version` entry from Wine Configuration.
