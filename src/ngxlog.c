@@ -1,6 +1,6 @@
 // ngxlog: frame generation for RDR2 under CrossOver/D3DMetal.
 // Loads as version.dll (forwards everything to the real one) and hooks the
-// game's DLSS (NGX) calls to grab each frame's depth and motion vectors. Those
+// game's DLSS (NGX) or FSR 2 calls to grab each frame's depth and motion vectors. Those
 // are handed to NVIDIA Streamline's DLSS Frame Generation (slfg.cpp), which
 // D3DMetal runs on Apple's MetalFX frame interpolator. The older path that
 // presents generated frames itself (fg.h) is kept as a fallback.
@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <string.h>
+#include <stddef.h>
 
 static FILE *logf;
 static CRITICAL_SECTION lk;
@@ -142,9 +143,9 @@ static void report(int f, intptr_t a, intptr_t b, intptr_t c, intptr_t d, intptr
     LONG n = InterlockedIncrement(&calls[f]);
     R("%s #%ld -> 0x%llx (%p %p %p %p)", fnames[f] + 16, n, (unsigned long long)r,
       (void *)a, (void *)b, (void *)c, (void *)d);
-    // Per-frame calls: first 5, then every 1000th. Everything else: always, in full.
+    // Per-frame calls: first 3 only (the crash black box keeps the recent ones). Everything else: always, in full.
     int frequent = f == F_EvaluateFeature || f == F_GetParameters || f == F_GetScratchBufferSize;
-    if (frequent && n > 5 && n % 1000) return;
+    if (frequent && n > 3) return;
     L("%s #%ld -> 0x%llx  thread=%lu", fnames[f], n, (unsigned long long)r, GetCurrentThreadId());
     switch (f) {
     case F_Init: case F_Init_Ext:
@@ -250,7 +251,36 @@ static int copy_into(void *cmd, ID3D12Resource *src, ID3D12Resource **dst) {
     return 1;
 }
 
+// ---- Native resolution (menu setting) --------------------------------------
+// The game asks DLSS which resolution to render at through a callback stored in
+// the NGX params. Wrapping it and answering "the output size" makes the game
+// render native; DLSS (MetalFX) then only anti-aliases. The game only asks when
+// its DLSS settings change, so the setting applies from then.
+static intptr_t (*optimalOrig)(void *);
+static intptr_t h_optimal(void *p) {
+    intptr_t r = optimalOrig(p);
+    unsigned w = pgetu(p, GET_UINT, "Width", 0), h = pgetu(p, GET_UINT, "Height", 0);
+    if (!fgset.native || !w || !h) return r;
+    static const char *keys[][2] = { { "OutWidth", "OutHeight" },
+        { "DLSS.Get.Dynamic.Max.Render.Width", "DLSS.Get.Dynamic.Max.Render.Height" },
+        { "DLSS.Get.Dynamic.Min.Render.Width", "DLSS.Get.Dynamic.Min.Render.Height" } };
+    for (int i = 0; i < 3; i++) { pset_uint(p, keys[i][0], w); pset_uint(p, keys[i][1], h); }
+    static LONG once;
+    if (!InterlockedExchange(&once, 1)) L("NATIVE rendering at %ux%u (was 0x%llx)", w, h, (long long)r);
+    return NGX_OK;
+}
+static void wrap_optimal(void *p) {
+    uint64_t v;
+    if (!p || pget(p, GET_VOIDP, "DLSSOptimalSettingsCallback", &v) != NGX_OK || !v || (void *)v == h_optimal) return;
+    optimalOrig = (void *)v;
+    ((void (*)(void *, const char *, void *))PSLOT(p, SET_VOIDP))(p, "DLSSOptimalSettingsCallback", h_optimal);
+}
+
+static void hudless_eval(void *cmd);
+
 static void fg_hook(int f, intptr_t a, intptr_t b, intptr_t c, intptr_t d, intptr_t r) {
+    if ((f == F_GetParameters || f == F_AllocateParameters || f == F_GetCapabilityParameters) && r == NGX_OK && a)
+        wrap_optimal(*(void **)a);
     if (f == F_ReleaseFeature && a && (void *)a == dlssH) {
         if (slfg_active()) slfg_dlss_paused(1);
         L("FRAMEGEN DLSS released; pausing frame generation");
@@ -299,6 +329,7 @@ static void fg_hook(int f, intptr_t a, intptr_t b, intptr_t c, intptr_t d, intpt
     fr.mvW = (dlssFlags & DLSS_FLAG_MV_LOWRES) ? fr.depthW : outW;
     fr.mvH = (dlssFlags & DLSS_FLAG_MV_LOWRES) ? fr.depthH : outH;
 
+    hudless_eval((void *)a);
     if (slfg_active()) {  // Streamline does generation + presentation; just feed it
         stage = "streamline frame";
         slfg_dlss_frame((void *)a, (void *)depth, (void *)mvecs, fr.depthW, fr.depthH, fr.mvW, fr.mvH,
@@ -417,6 +448,126 @@ static void patch_slot(void **vt, int i, void *fn, void **o) {
     *o = vt[i];
     vt[i] = fn;
     VirtualProtect(&vt[i], 8, old, &old);
+}
+
+// ---- HUD-free image ---------------------------------------------------------
+// D3DMetal builds generated frames from a HUD-free image when it gets one, and
+// lays the HUD on top unwarped. RDR2 makes none, but after DLSS it
+// post-processes, writes the finished picture into the backbuffer, and only
+// then binds the backbuffer together with a depth/stencil buffer to draw the
+// HUD (found with a one-off log of RDR2's render passes). So the first
+// backbuffer+depth bind after a DLSS evaluate is the spot: copy the backbuffer
+// there, on the game's own command list; slfg.cpp hands the copy to
+// Streamline. The menu's "HUD fix" setting turns it off.
+#define HL_SLOT(m) (offsetof(ID3D12GraphicsCommandListVtbl, m) / sizeof(void *))
+#define HL_DSLOT(m) (offsetof(ID3D12DeviceVtbl, m) / sizeof(void *))
+
+// Render-target views -> their resource, so a bind can be recognized.
+typedef struct { SIZE_T h; void *r; } HlRtv;
+#define HL_NRTV 65536
+static HlRtv hlRtv[HL_NRTV];  // ponytail: never shrinks; games reuse handles, entries overwrite
+static SRWLOCK hlRtvLk = SRWLOCK_INIT;
+static void *oCreateRTV, *oOMSet;
+
+static void hl_put(SIZE_T h, void *r) {
+    unsigned i = (unsigned)((h >> 3) * 2654435761u) % HL_NRTV;
+    AcquireSRWLockExclusive(&hlRtvLk);
+    for (unsigned n = 0; n < HL_NRTV && hlRtv[i].h && hlRtv[i].h != h; n++) i = (i + 1) % HL_NRTV;
+    hlRtv[i] = (HlRtv){ h, r };
+    ReleaseSRWLockExclusive(&hlRtvLk);
+}
+static void *hl_get(SIZE_T h) {
+    unsigned i = (unsigned)((h >> 3) * 2654435761u) % HL_NRTV;
+    void *r = NULL;
+    AcquireSRWLockShared(&hlRtvLk);
+    for (unsigned n = 0; n < HL_NRTV && hlRtv[i].h; n++, i = (i + 1) % HL_NRTV)
+        if (hlRtv[i].h == h) { r = hlRtv[i].r; break; }
+    ReleaseSRWLockShared(&hlRtvLk);
+    return r;
+}
+
+static void *hlBack[4];                    // backbuffers seen at Present
+static volatile LONG hlArmed;              // a DLSS frame is waiting for its capture
+static ID3D12Resource *hlTex[4];
+static unsigned hlSlot;
+static ID3D12Resource *volatile hlReady;   // captured, not yet handed to Streamline
+
+static int hl_is_back(void *r) {
+    for (int i = 0; i < 4; i++) if (r && hlBack[i] == r) return 1;
+    return 0;
+}
+static void hl_barrier(ID3D12GraphicsCommandList *l, ID3D12Resource *r, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_STATES b) {
+    D3D12_RESOURCE_BARRIER br = { .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        .Transition = { r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, a, b } };
+    ID3D12GraphicsCommandList_ResourceBarrier(l, 1, &br);
+}
+static void hl_capture(ID3D12GraphicsCommandList *l, ID3D12Resource *bb) {
+    const D3D12_RESOURCE_STATES srv = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_DESC d = ID3D12Resource_GetDesc(bb);
+    // ponytail: 4 copies in rotation, no fence; Streamline is done with a copy well before 4 frames later
+    ID3D12Resource **t = &hlTex[hlSlot++ % 4];
+    if (*t) {
+        D3D12_RESOURCE_DESC m = ID3D12Resource_GetDesc(*t);
+        if (m.Width != d.Width || m.Height != d.Height || m.Format != d.Format) { ID3D12Resource_Release(*t); *t = NULL; }
+    }
+    if (!*t) {
+        ID3D12Device *dev = NULL;
+        if (FAILED(ID3D12Resource_GetDevice(bb, &IID_ID3D12Device, (void **)&dev))) return;
+        D3D12_RESOURCE_DESC m = d;
+        m.Alignment = 0;
+        m.Flags = D3D12_RESOURCE_FLAG_NONE;
+        D3D12_HEAP_PROPERTIES hp = { .Type = D3D12_HEAP_TYPE_DEFAULT };
+        ID3D12Device_CreateCommittedResource(dev, &hp, D3D12_HEAP_FLAG_NONE, &m, srv, NULL, &IID_ID3D12Resource, (void **)t);
+        ID3D12Device_Release(dev);
+        if (!*t) return;
+        L("HUDLESS capturing %llux%u fmt=%u", d.Width, d.Height, d.Format);
+    }
+    hl_barrier(l, bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    hl_barrier(l, *t, srv, D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12GraphicsCommandList_CopyResource(l, *t, bb);
+    hl_barrier(l, *t, D3D12_RESOURCE_STATE_COPY_DEST, srv);
+    hl_barrier(l, bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    hlReady = *t;
+}
+void *hudless_take(void) { return InterlockedExchangePointer((void *volatile *)&hlReady, NULL); }
+
+static void STDMETHODCALLTYPE h_CreateRTV(ID3D12Device *d, ID3D12Resource *r, const D3D12_RENDER_TARGET_VIEW_DESC *v, D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    ((void (STDMETHODCALLTYPE *)(ID3D12Device *, ID3D12Resource *, const D3D12_RENDER_TARGET_VIEW_DESC *, D3D12_CPU_DESCRIPTOR_HANDLE))oCreateRTV)(d, r, v, h);
+    hl_put(h.ptr, r);
+}
+static void STDMETHODCALLTYPE h_OMSet(ID3D12GraphicsCommandList *l, UINT n, const D3D12_CPU_DESCRIPTOR_HANDLE *rt, BOOL single, const D3D12_CPU_DESCRIPTOR_HANDLE *ds) {
+    if (hlArmed && ds && n && rt) {
+        void *r = hl_get(rt[0].ptr);
+        if (hl_is_back(r) && InterlockedExchange(&hlArmed, 0)) hl_capture(l, (ID3D12Resource *)r);
+    }
+    ((void (STDMETHODCALLTYPE *)(ID3D12GraphicsCommandList *, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE *, BOOL, const D3D12_CPU_DESCRIPTOR_HANDLE *))oOMSet)(l, n, rt, single, ds);
+}
+
+// From device creation: RDR2 makes its render-target views at startup, so
+// they have to be watched from the start.
+static void hudless_device(IUnknown *any) {
+    ID3D12Device *dev = NULL;
+    if (oCreateRTV || FAILED(IUnknown_QueryInterface(any, &IID_ID3D12Device, (void **)&dev))) return;
+    patch_slot(*(void ***)dev, HL_DSLOT(CreateRenderTargetView), h_CreateRTV, &oCreateRTV);
+    ID3D12Device_Release(dev);
+}
+
+// From the Streamline present hook: the backbuffer being presented.
+void hudless_present(void *backbuffer) {
+    static unsigned n;
+    if (backbuffer && !hl_is_back(backbuffer)) hlBack[n++ % 4] = backbuffer;
+}
+
+// From each DLSS evaluate: arm the capture (and hook the game's command lists once).
+static void hudless_eval(void *cmd) {
+    if (!fgset.hudfix || !cmd) return;
+    if (!oOMSet) {  // all of the game's command lists share one method table
+        ID3D12Device *dev = NULL;  // normally hooked at device creation already
+        ID3D12GraphicsCommandList_GetDevice((ID3D12GraphicsCommandList *)cmd, &IID_ID3D12Device, (void **)&dev);
+        if (dev) { hudless_device((IUnknown *)dev); ID3D12Device_Release(dev); }
+        patch_slot(*(void ***)cmd, HL_SLOT(OMSetRenderTargets), h_OMSet, &oOMSet);
+    }
+    hlArmed = 1;
 }
 
 // Our own command lists on the game's queue, ring-buffered behind a fence.
@@ -805,6 +956,7 @@ static HRESULT WINAPI h_CDF2(UINT fl, REFIID r, void **f) {
 static void *oCreateDevice;
 static HRESULT WINAPI h_CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL fl, REFIID r, void **dev) {
     HRESULT hr = ((HRESULT (*)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **))oCreateDevice)(adapter, fl, r, dev);
+    if (SUCCEEDED(hr) && dev && *dev) hudless_device(*dev);
     if (SUCCEEDED(hr) && dev && *dev && slfg_startup(gDir)) slfg_set_device(*dev);
     return hr;
 }
@@ -845,6 +997,107 @@ static void hook_dxgi(void) {
     uint8_t *t2 = d3d ? alloc_above(d3d, 16) : NULL;
     if (t2 && (oCreateDevice = eat_hook(d3d, "D3D12CreateDevice", h_CreateDevice, t2)))
         L("hooked D3D12CreateDevice (+%d game import entries)", iat_redirect(exe, oCreateDevice, h_CreateDevice));
+}
+
+// ---- FSR 2 input --------------------------------------------------------------
+// With FSR 2 picked in RDR2 (instead of DLSS) the same per-frame data comes
+// through AMD's ffx_fsr2_api_x64.dll: hook its context create/dispatch and feed
+// frame generation exactly like the DLSS path. FfxResource gained a 64-wchar
+// name in FSR 2.1, so both layouts are declared and the one whose color size
+// matches the render size is used (logged as "FSR2 layout").
+typedef struct { int type, format; uint32_t width, height, depth, mips, flags; } FfxResDesc;
+typedef struct { void *resource; FfxResDesc desc; int state; char isDepth; uint64_t descriptorData; } FfxRes20;
+typedef struct { void *resource; wchar_t name[64]; FfxResDesc desc; int state; char isDepth; uint64_t descriptorData; } FfxRes21;
+#define FFX_DISPATCH(R) struct { void *cmd; R color, depth, mvecs, exposure, reactive, tc, output; \
+    float jitterX, jitterY, mvScaleX, mvScaleY; uint32_t renderW, renderH; char sharpen; float sharpness, \
+    frameMs, preExposure; char reset; float nearZ, farZ, fov; }
+typedef FFX_DISPATCH(FfxRes20) FfxDispatch20;
+typedef FFX_DISPATCH(FfxRes21) FfxDispatch21;
+typedef struct { uint32_t flags, maxRenderW, maxRenderH, displayW, displayH; } FfxCreateHead;
+#define FSR2_DISPLAY_RES_MV (1u << 1)
+#define FSR2_DEPTH_INVERTED (1u << 3)
+
+static intptr_t (*oFsrCreate)(void *, const FfxCreateHead *), (*oFsrDispatch)(void *, const void *), (*oFsrDestroy)(void *);
+static intptr_t (*oFsrRenderRes)(uint32_t *, uint32_t *, uint32_t, uint32_t, int);
+static float (*oFsrRatio)(int);
+static uint32_t fsrFlags;
+static int fsrLayout;  // 0 unknown, 20 or 21
+
+static intptr_t h_FsrCreate(void *ctx, const FfxCreateHead *d) {
+    intptr_t r = oFsrCreate(ctx, d);
+    if (d) fsrFlags = d->flags;
+    L("FSR2 context create -> %lld: flags=0x%x maxRender=%ux%u display=%ux%u", (long long)r, d ? d->flags : 0,
+      d ? d->maxRenderW : 0, d ? d->maxRenderH : 0, d ? d->displayW : 0, d ? d->displayH : 0);
+    if (r == 0 && slfg_active()) slfg_dlss_paused(0);
+    return r;
+}
+static intptr_t h_FsrDestroy(void *ctx) {
+    L("FSR2 context destroy; pausing frame generation");
+    if (slfg_active()) slfg_dlss_paused(1);
+    return oFsrDestroy(ctx);
+}
+static int fsr_fits(const FfxResDesc *c, uint32_t w, uint32_t h) {
+    return w && h && w <= 16384 && h <= 16384 && c->width == w && c->height == h;
+}
+static intptr_t h_FsrDispatch(void *ctx, const void *desc) {
+    static LONG n;
+    LONG k = ++n;
+    if (desc && !fsrLayout) {
+        const FfxDispatch20 *a = desc; const FfxDispatch21 *b = desc;
+        fsrLayout = fsr_fits(&b->color.desc, b->renderW, b->renderH) ? 21 : fsr_fits(&a->color.desc, a->renderW, a->renderH) ? 20 : 0;
+        if (!fsrLayout && k <= 3) L("FSR2 dispatch #%ld: layout not recognized (2.1+ says render %ux%u color %ux%u; 2.0 says render %ux%u color %ux%u)",
+                                   k, b->renderW, b->renderH, b->color.desc.width, b->color.desc.height,
+                                   a->renderW, a->renderH, a->color.desc.width, a->color.desc.height);
+        if (fsrLayout) L("FSR2 layout %s", fsrLayout == 21 ? "2.1+ (resources have names)" : "2.0");
+    }
+    if (fsrLayout) {
+        void *cmd, *depth, *mvecs; uint32_t rw, rh, dw, dh, mw, mh, ow, oh; float jx, jy, sx, sy; int reset;
+#define FSR_READ(d) cmd = d->cmd; depth = d->depth.resource; mvecs = d->mvecs.resource; rw = d->renderW; rh = d->renderH; \
+        dw = d->depth.desc.width; dh = d->depth.desc.height; mw = d->mvecs.desc.width; mh = d->mvecs.desc.height; \
+        ow = d->output.desc.width; oh = d->output.desc.height; jx = d->jitterX; jy = d->jitterY; \
+        sx = d->mvScaleX; sy = d->mvScaleY; reset = d->reset
+        if (fsrLayout == 21) { const FfxDispatch21 *d = desc; FSR_READ(d); } else { const FfxDispatch20 *d = desc; FSR_READ(d); }
+#undef FSR_READ
+        if (k <= 3) L("FSR2 dispatch #%ld: cmd=%p render=%ux%u depth=%p %ux%u mv=%p %ux%u out=%ux%u jitter=%.3f,%.3f mvscale=%.1f,%.1f reset=%d flags=0x%x",
+                      k, cmd, rw, rh, depth, dw, dh, mvecs, mw, mh, ow, oh, jx, jy, sx, sy, reset, fsrFlags);
+        if (slfg_active() && cmd && depth && mvecs) {
+            // MVs at render size unless the game said display size; the depth is rendered at render size
+            unsigned mvw = (fsrFlags & FSR2_DISPLAY_RES_MV) ? ow : rw, mvh = (fsrFlags & FSR2_DISPLAY_RES_MV) ? oh : rh;
+            slfg_dlss_frame(cmd, depth, mvecs, rw, rh, mvw, mvh, ow, oh, jx, jy, sx, sy, !!(fsrFlags & FSR2_DEPTH_INVERTED), reset);
+            hudless_eval(cmd);
+        }
+    }
+    return oFsrDispatch(ctx, desc);
+}
+// Native resolution (menu setting) for FSR 2: whichever way the game asks.
+static intptr_t h_FsrRenderRes(uint32_t *rw, uint32_t *rh, uint32_t dw, uint32_t dh, int mode) {
+    intptr_t r = oFsrRenderRes(rw, rh, dw, dh, mode);
+    if (fgset.native && rw && rh) { *rw = dw; *rh = dh; }
+    L("FSR2 render size for mode %d at %ux%u -> %ux%u%s", mode, dw, dh, rw ? *rw : 0, rh ? *rh : 0, fgset.native ? " (native)" : "");
+    return r;
+}
+static float h_FsrRatio(int mode) {
+    float f = fgset.native ? 1.0f : oFsrRatio(mode);
+    L("FSR2 upscale ratio for mode %d -> %.2f%s", mode, f, fgset.native ? " (native)" : "");
+    return f;
+}
+
+static void hook_fsr2(void) {
+    HMODULE m = LoadLibraryW(L"ffx_fsr2_api_x64.dll");
+    if (!m) { L("FSR2: ffx_fsr2_api_x64.dll not found (err %lu)", GetLastError()); return; }
+    uint8_t *t = alloc_above(m, 5 * 16);
+    if (!t) { L("FSR2: no memory near ffx_fsr2_api_x64.dll for thunks"); return; }
+    oFsrCreate = eat_hook(m, "ffxFsr2ContextCreate", h_FsrCreate, t);
+    oFsrDispatch = eat_hook(m, "ffxFsr2ContextDispatch", h_FsrDispatch, t + 16);
+    oFsrDestroy = eat_hook(m, "ffxFsr2ContextDestroy", h_FsrDestroy, t + 32);
+    oFsrRenderRes = eat_hook(m, "ffxFsr2GetRenderResolutionFromQualityMode", h_FsrRenderRes, t + 48);
+    oFsrRatio = eat_hook(m, "ffxFsr2GetUpscaleRatioFromQualityMode", h_FsrRatio, t + 64);
+    HMODULE exe = GetModuleHandleW(NULL);  // the game may already have them in its import table
+    int n = iat_redirect(exe, oFsrCreate, h_FsrCreate) + iat_redirect(exe, oFsrDispatch, h_FsrDispatch) +
+            iat_redirect(exe, oFsrDestroy, h_FsrDestroy) + iat_redirect(exe, oFsrRenderRes, h_FsrRenderRes) +
+            iat_redirect(exe, oFsrRatio, h_FsrRatio);
+    L("FSR2 hooked: create %p dispatch %p destroy %p renderres %p ratio %p (+%d game import entries)",
+      (void *)oFsrCreate, (void *)oFsrDispatch, (void *)oFsrDestroy, (void *)oFsrRenderRes, (void *)oFsrRatio, n);
 }
 
 // Logs each newly loaded module (for an hour), so we can see which DLLs the game
@@ -941,8 +1194,10 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, void *res) {
     logf = _wfopen(p, L"w");
 
     char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH);
-    L("rdr2-mac-framegen v0.2 loaded into %s", exe);
+    L("rdr2-mac-framegen v0.3 loaded into %s", exe);
     slfg_set_logger(slog);
+    menu_load(gDir);
+    L("settings: framegen=%d native=%d hudfix=%d (framegen.ini; Ctrl+Shift+M in game)", fgset.framegen, fgset.native, fgset.hudfix);
     AddVectoredExceptionHandler(1, on_exception);
     DEVMODEW dm = { .dmSize = sizeof dm };
     if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency >= 30 &&
@@ -961,6 +1216,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, void *res) {
     load_real_version();
     hook_nvngx();
     hook_dxgi();
+    hook_fsr2();
     CloseHandle(CreateThread(NULL, 0, watch_modules, NULL, 0, NULL));
     return TRUE;
 }

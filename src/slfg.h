@@ -14,6 +14,14 @@ void slfg_dlss_frame(void *cmdlist, void *depth, void *mvecs, unsigned depthW, u
                      float jitterX, float jitterY, float mvScaleX, float mvScaleY,
                      int depthInverted, int reset);
 void slfg_dlss_paused(int paused);
+void hudless_present(void *backbuffer);   // in ngxlog.c
+
+// menu.cpp: settings (framegen.ini) and the Ctrl+Shift+M menu
+typedef struct { int framegen, native, hudfix; } FgSettings;
+extern FgSettings fgset;
+void menu_load(const wchar_t *dir);
+void menu_present(void *swapchain, void *queue);  // draws the menu if open
+void *hudless_take(void);                 // in ngxlog.c: this frame's HUD-free copy, or NULL
 #ifdef __cplusplus
 }
 #endif

@@ -222,6 +222,25 @@ extern "C" void slfg_dlss_frame(void *cmdlist, void *depth, void *mvecs, unsigne
                              frameIndex, (int)rc, (int)rt, depthW, depthH, mvW, mvH, outW, outH);
 }
 
+// ---- HUD-free image ---------------------------------------------------------
+// D3DMetal builds generated frames from a HUD-free image when it gets one
+// (DLSSG.HUDLess) and lays the HUD on top unwarped. ngxlog.c copies the
+// finished picture just before RDR2 starts drawing its HUD; tag that copy.
+static ID3D12CommandQueue *gameQueue;  // the queue the game's swapchain was made with (also draws the menu)
+
+static void hudless_tag(void) {
+    ID3D12Resource *t = (ID3D12Resource *)hudless_take();
+    if (!t || !token || !pSetTag) return;
+    D3D12_RESOURCE_DESC d = t->GetDesc();
+    const uint32_t srv = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    sl::Resource r(sl::ResourceType::eTex2d, t, srv);
+    sl::Extent e{ 0, 0, (uint32_t)d.Width, d.Height };
+    sl::ResourceTag tag(&r, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent, &e);
+    sl::Result rt = pSetTag(*token, viewport, &tag, 1, nullptr);
+    static int logged;
+    if (logged++ < 3 || rt != sl::Result::eOk) if (logged < 20) LOG("HUDLESS %llux%u tag -> %d", d.Width, d.Height, (int)rt);
+}
+
 // ---- Present markers + frame-gen on/off around resizes ---------------------
 // The game holds Streamline's proxy swapchain; we patch the proxy's method
 // table (in sl.interposer.dll) to add the Reflex present markers it requires.
@@ -231,12 +250,23 @@ static void *gameSc;  // the game's proxy (other proxies share its method table)
 // Presents with no DLSS evaluate before them (pause menu, DLSS off) give frame
 // generation nothing new to interpolate, so it goes off until DLSS frames come
 // back. Three in a row, not one, in case evaluate and Present ever run out of order.
-static void before_present(void) {
+static void before_present(IDXGISwapChain *sc) {
+    IDXGISwapChain3 *sc3 = nullptr;  // the backbuffer, for the HUD-free capture
+    if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc3)))) {
+        ID3D12Resource *bb = nullptr;
+        sc3->GetBuffer(sc3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&bb));
+        hudless_present(bb);
+        if (bb) bb->Release();
+        sc3->Release();
+    }
     if (InterlockedExchange(&dlssFrames, 0)) missed = 0;
     else if (++missed >= 3 && fgOn) set_mode(0);
     if (!token) return;
     if (pMarker) { pMarker(sl::PCLMarker::eRenderSubmitEnd, *token); pMarker(sl::PCLMarker::ePresentStart, *token); }
-    if (wantOn && !fgOn && !missed) set_mode(1);
+    if (wantOn && fgset.framegen && !fgOn && !missed) set_mode(1);
+    if (!fgset.framegen && fgOn) set_mode(0);
+    if (fgOn) hudless_tag();
+    menu_present(sc, gameQueue);
 }
 static void after_present(void) {
     if (token && pMarker) pMarker(sl::PCLMarker::ePresentEnd, *token);
@@ -252,7 +282,7 @@ static void after_present(void) {
 static HRESULT STDMETHODCALLTYPE h_Present(IDXGISwapChain *sc, UINT sync, UINT flags) {
     if ((void *)sc != gameSc || (flags & DXGI_PRESENT_TEST))  // not the game's own, or only asks "is the window visible?"
         return ((HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain *, UINT, UINT))oPresent)(sc, sync, flags);
-    before_present();
+    before_present(sc);
     HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain *, UINT, UINT))oPresent)(sc, sync, flags);
     after_present();
     return hr;
@@ -260,7 +290,7 @@ static HRESULT STDMETHODCALLTYPE h_Present(IDXGISwapChain *sc, UINT sync, UINT f
 static HRESULT STDMETHODCALLTYPE h_Present1(IDXGISwapChain1 *sc, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS *pp) {
     if ((void *)sc != gameSc || (flags & DXGI_PRESENT_TEST))
         return ((HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain1 *, UINT, UINT, const DXGI_PRESENT_PARAMETERS *))oPresent1)(sc, sync, flags, pp);
-    before_present();
+    before_present(sc);
     HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain1 *, UINT, UINT, const DXGI_PRESENT_PARAMETERS *))oPresent1)(sc, sync, flags, pp);
     after_present();
     return hr;
@@ -302,12 +332,15 @@ static int in_sl(void *p) {
 // The swapchain the game got from Streamline's proxy factory: already a proxy.
 // Hook the proxy's methods for the markers. (Swapchains Streamline creates on
 // the native factory are its own internal ones; never wrap or patch those.)
-static void game_swapchain(void **sc) {
+static void game_swapchain(IUnknown *queue, void **sc) {
     static void **vt;
     if (!sc || !*sc) return;
     void **v = *(void ***)*sc;
     LOG("STREAMLINE game swapchain %p, methods %p %s", *sc, (void *)v, in_sl(v) ? "in sl.interposer" : "NOT Streamline's - markers not hooked");
     gameSc = *sc;
+    if (gameQueue) gameQueue->Release();
+    gameQueue = nullptr;
+    queue->QueryInterface(IID_PPV_ARGS(&gameQueue));  // DX12 swapchains are made with a queue, not a device
     if (!in_sl(v) || v == vt) return;
     vt = v;
     patch(v, 8, (void *)h_Present, &oPresent);
@@ -320,22 +353,22 @@ static void game_swapchain(void **sc) {
 static void *oFacSC, *oFacHwnd, *oFacCore, *oFacComp;
 static HRESULT STDMETHODCALLTYPE pf_CreateSC(void *f, IUnknown *dev, void *desc, void **out) {
     HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(void *, IUnknown *, void *, void **))oFacSC)(f, dev, desc, out);
-    if (SUCCEEDED(hr)) game_swapchain(out);
+    if (SUCCEEDED(hr)) game_swapchain(dev, out);
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE pf_CreateSCHwnd(void *f, IUnknown *dev, HWND w, void *d, void *fd, void *o, void **out) {
     HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(void *, IUnknown *, HWND, void *, void *, void *, void **))oFacHwnd)(f, dev, w, d, fd, o, out);
-    if (SUCCEEDED(hr)) game_swapchain(out);
+    if (SUCCEEDED(hr)) game_swapchain(dev, out);
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE pf_CreateSCCore(void *f, IUnknown *dev, IUnknown *win, void *d, void *o, void **out) {
     HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(void *, IUnknown *, IUnknown *, void *, void *, void **))oFacCore)(f, dev, win, d, o, out);
-    if (SUCCEEDED(hr)) game_swapchain(out);
+    if (SUCCEEDED(hr)) game_swapchain(dev, out);
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE pf_CreateSCComp(void *f, IUnknown *dev, void *d, void *o, void **out) {
     HRESULT hr = ((HRESULT(STDMETHODCALLTYPE *)(void *, IUnknown *, void *, void *, void **))oFacComp)(f, dev, d, o, out);
-    if (SUCCEEDED(hr)) game_swapchain(out);
+    if (SUCCEEDED(hr)) game_swapchain(dev, out);
     return hr;
 }
 

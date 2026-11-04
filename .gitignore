@@ -6,3 +6,4 @@ rdr2-framegen-files/
 *.dll
 .DS_Store
 release/
+imgui/
