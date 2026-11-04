@@ -36,6 +36,7 @@ Settings are saved in `framegen.ini` in the game folder and stay between launche
 ## Known issues
 
 - **Keys and mouse reach the game while the menu is open** (see above).
+- **Scopes ghost slightly.** When aiming down a scope (rifles, repeaters), the scope overlay can ghost a little when you move. RDR2 seems to draw it as part of the picture rather than with the HUD, so the HUD fix doesn't catch it. It's minor.
 - CrossOver logs a few missing NVIDIA functions (`SetReflexSync` and others). These are harmless.
 
 ## Requirements
