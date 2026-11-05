@@ -35,6 +35,8 @@ Settings are saved in `framegen.ini` in the game folder and stay between launche
 
 ## Known issues
 
+- **Turn HDR off**, in RDR2's display settings and in macOS (System Settings → Displays). With HDR on, the HUD fix doesn't work and the HUD ghosts again. Restart the game after changing it.
+- **Turn VSync off on a 60 Hz display.** With VSync on, a 60 Hz screen (most TVs) gets stuck at 30 fps shown (15 real) and feels sluggish. VSync off has no tearing on a Mac.
 - **Keys and mouse reach the game while the menu is open** (see above).
 - **Scopes ghost slightly.** When aiming down a scope (rifles, repeaters), the scope overlay can ghost a little when you move. RDR2 seems to draw it as part of the picture rather than with the HUD, so the HUD fix doesn't catch it. It's minor.
 - CrossOver logs a few missing NVIDIA functions (`SetReflexSync` and others). These are harmless.
@@ -58,7 +60,7 @@ Settings are saved in `framegen.ini` in the game folder and stay between launche
    - `nvngx_dlssg.dll`
 3. Put all 7 files in the RDR2 game folder, next to `RDR2.exe`.
 4. Tell Wine to load the mod's `version.dll`: in CrossOver, open the bottle's **Wine Configuration** → **Libraries**, type `version`, click **Add**, and make sure it says **(native, builtin)**.
-5. Start the game, set **FSR 2** (or DLSS) in the graphics settings, and play. With the Metal HUD on, you'll see MetalFX frame interpolation listed. VSync on or off both work.
+5. Start the game, set **FSR 2** (or DLSS) in the graphics settings, and play. With the Metal HUD on, you'll see MetalFX frame interpolation listed. Turn VSync and HDR off (see Known issues).
 
 ### Why is the mod called `version.dll`?
 
