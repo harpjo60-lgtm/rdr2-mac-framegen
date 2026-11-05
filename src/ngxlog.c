@@ -812,6 +812,10 @@ static HRESULT present_hook(void *sc, UINT sync, UINT flags, const DXGI_PRESENT_
           fr.jitterX, fr.jitterY, fr.depthInverted);
     if (!show) return call_present(sc, sync, flags, pp, is1);  // bb is still the real frame
 
+    // We pace both shown frames to the refresh ourselves (wait_half_frame), so a
+    // VSync wait on top costs each one an extra refresh: 60 Hz + VSync ended up at
+    // 30 shown / 15 real. macOS composites the window, so no tearing without it.
+    sync = 0;
     int late = 0;
     double slept = wait_half_frame(&late);
     stage = "present: show generated";
