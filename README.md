@@ -9,7 +9,7 @@ RDR2 has upscaling (DLSS and FSR 2) but no frame generation. This mod adds it: i
 Tested on a MacBook Air M4 (macOS 27, CrossOver with D3DMetal 3 / GPTK 3, 100 Hz display): **about 70 fps with FSR 2 Performance**, looking close to native 1080p. It will probably also work in other Wine-based launchers and wrappers that use D3DMetal with DLSS/MetalFX support, but only CrossOver has been tested.
 
 **Before you start:**
-- **Use FSR 2 in the game's graphics settings** (recommended; Performance looks great) or DLSS. With neither on, there's no frame generation.
+- **Use FSR 2 in the game's graphics settings** (recommended; Performance looks great) or DLSS. In my experience DLSS (which becomes MetalFX on a Mac) looks very bad in RDR2. With neither on, there's no frame generation.
 - **Press Ctrl+Shift+M in the game** to open the mod's menu (frame generation on/off, native resolution). It's an odd combination on purpose: it works on a laptop keyboard and RDR2 doesn't use it.
 - **The HUD doesn't ghost.** The minimap, crosshair, ammo and prompts stay sharp while the world gets the generated frames.
 
@@ -20,7 +20,7 @@ Tested on a MacBook Air M4 (macOS 27, CrossOver with D3DMetal 3 / GPTK 3, 100 Hz
 The mod works with both; pick one in RDR2's graphics settings.
 
 - **FSR 2 (recommended).** AMD's upscaler, built into RDR2 and tuned by Rockstar. It runs as part of the game, so it looks the same as on Windows. Even Performance mode looks close to native.
-- **DLSS.** On a Mac, CrossOver turns DLSS into Apple's MetalFX upscaler. It works, but foliage (bushes, grass, trees) flickers and the image is blurrier, even at native resolution.
+- **DLSS.** On a Mac, CrossOver turns DLSS into Apple's MetalFX upscaler. It works, but foliage (bushes, grass, trees) flickers and the image is blurrier, even at native resolution. In my experience it's very bad in RDR2 specifically, even though DLSS to MetalFX works fine in other games like Cyberpunk 2077, about as good as FSR 2. That's just my experience; it may be better for others.
 
 ## The in-game menu: Ctrl+Shift+M
 
