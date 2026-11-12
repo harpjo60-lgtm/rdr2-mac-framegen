@@ -36,7 +36,7 @@ Settings are saved in `framegen.ini` in the game folder and stay between launche
 ## Known issues
 
 - **Turn HDR off**, in RDR2's display settings and in macOS (System Settings → Displays). With HDR on, the HUD fix doesn't work and the HUD ghosts again. Restart the game after changing it.
-- **Turn VSync off.** VSync doesn't work with frame generation on any screen: it locks the frame rate low and feels sluggish (tested: 50 fps on a 100 Hz monitor, 30 fps on a 60 Hz TV, where VSync off gave more). VSync off has no tearing on a Mac. v0.3.1 tried to fix this, but it didn't help.
+- **Turn VSync off.** VSync doesn't work with frame generation on any screen: it locks the frame rate low and feels sluggish (tested: 50 fps on a 100 Hz monitor, 30 fps on a 60 Hz TV, where VSync off gave more). VSync off has no tearing on a Mac. v0.3.1 has a possible fix for this, not yet tested in the game. (VSync "Half" caps at half the refresh rate by design, so leave it off.)
 - **Keys and mouse reach the game while the menu is open** (see above).
 - **Scopes ghost slightly.** When aiming down a scope (rifles, repeaters), the scope overlay can ghost a little when you move. RDR2 seems to draw it as part of the picture rather than with the HUD, so the HUD fix doesn't catch it. It's minor.
 - CrossOver logs a few missing NVIDIA functions (`SetReflexSync` and others). These are harmless.
